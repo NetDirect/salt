@@ -34,10 +34,11 @@ import salt.utils.network
 # of the modules are loaded and are generally available for any usage.
 import salt.modules.cmdmod
 
-__salt__ = {
+__coresalt__ = {
     'cmd.run': salt.modules.cmdmod._run_quiet,
     'cmd.run_all': salt.modules.cmdmod._run_all_quiet
 }
+
 log = logging.getLogger(__name__)
 
 HAS_WMI = False
@@ -154,7 +155,7 @@ def _linux_gpu_data():
 
     devs = []
     try:
-        lspci_out = __salt__['cmd.run']('lspci -vmm')
+        lspci_out = __coresalt__['cmd.run']('lspci -vmm')
 
         cur_dev = {}
         error = False
@@ -215,7 +216,7 @@ def _netbsd_gpu_data():
 
     gpus = []
     try:
-        pcictl_out = __salt__['cmd.run']('pcictl pci0 list')
+        pcictl_out = __coresalt__['cmd.run']('pcictl pci0 list')
 
         for line in pcictl_out.splitlines():
             for vendor in known_vendors:
@@ -245,7 +246,7 @@ def _osx_gpudata():
 
     gpus = []
     try:
-        pcictl_out = __salt__['cmd.run']('system_profiler SPDisplaysDataType')
+        pcictl_out = __coresalt__['cmd.run']('system_profiler SPDisplaysDataType')
 
         for line in pcictl_out.splitlines():
             fieldname, _, fieldval = line.partition(': ')
@@ -290,14 +291,14 @@ def _bsd_cpudata(osdata):
         cmds['cpu_model'] = '{0} -n machdep.cpu.brand_string'.format(sysctl)
         cmds['cpu_flags'] = '{0} -n machdep.cpu.features'.format(sysctl)
 
-    grains = dict([(k, __salt__['cmd.run'](v)) for k, v in cmds.items()])
+    grains = dict([(k, __coresalt__['cmd.run'](v)) for k, v in cmds.items()])
 
     if 'cpu_flags' in grains and isinstance(grains['cpu_flags'], basestring):
         grains['cpu_flags'] = grains['cpu_flags'].split(' ')
 
     if osdata['kernel'] == 'NetBSD':
         grains['cpu_flags'] = []
-        for line in __salt__['cmd.run']('cpuctl identify 0').splitlines():
+        for line in __coresalt__['cmd.run']('cpuctl identify 0').splitlines():
             m = re.match(r'cpu[0-9]:\ features[0-9]?\ .+<(.+)>', line)
             if m:
                 flag = m.group(1).split(',')
@@ -341,16 +342,16 @@ def _sunos_cpudata():
     grains = {}
     grains['cpu_flags'] = []
 
-    grains['cpuarch'] = __salt__['cmd.run']('uname -p')
+    grains['cpuarch'] = __coresalt__['cmd.run']('uname -p')
     psrinfo = '/usr/sbin/psrinfo 2>/dev/null'
-    grains['num_cpus'] = len(__salt__['cmd.run'](psrinfo).splitlines())
+    grains['num_cpus'] = len(__coresalt__['cmd.run'](psrinfo).splitlines())
     kstat_info = 'kstat -p cpu_info:0:*:brand'
-    for line in __salt__['cmd.run'](kstat_info).splitlines():
+    for line in __coresalt__['cmd.run'](kstat_info).splitlines():
         match = re.match(r'(\w+:\d+:\w+\d+:\w+)\s+(.+)', line)
         if match:
             grains['cpu_model'] = match.group(2)
     isainfo = 'isainfo -n -v'
-    for line in __salt__['cmd.run'](isainfo).splitlines():
+    for line in __coresalt__['cmd.run'](isainfo).splitlines():
         match = re.match(r'^\s+(.+)', line)
         if match:
             cpu_flags = match.group(1).split()
@@ -381,15 +382,15 @@ def _memdata(osdata):
         sysctl = salt.utils.which('sysctl')
         if sysctl:
             if osdata['kernel'] == 'Darwin':
-                mem = __salt__['cmd.run']('{0} -n hw.memsize'.format(sysctl))
+                mem = __coresalt__['cmd.run']('{0} -n hw.memsize'.format(sysctl))
             else:
-                mem = __salt__['cmd.run']('{0} -n hw.physmem'.format(sysctl))
+                mem = __coresalt__['cmd.run']('{0} -n hw.physmem'.format(sysctl))
             if osdata['kernel'] == 'NetBSD' and mem.startswith('-'):
-                mem = __salt__['cmd.run']('{0} -n hw.physmem64'.format(sysctl))
+                mem = __coresalt__['cmd.run']('{0} -n hw.physmem64'.format(sysctl))
             grains['mem_total'] = int(mem) / 1024 / 1024
     elif osdata['kernel'] == 'SunOS':
         prtconf = '/usr/sbin/prtconf 2>/dev/null'
-        for line in __salt__['cmd.run'](prtconf).splitlines():
+        for line in __coresalt__['cmd.run'](prtconf).splitlines():
             comps = line.split(' ')
             if comps[0].strip() == 'Memory' and comps[1].strip() == 'size:':
                 grains['mem_total'] = int(comps[2].strip())
@@ -404,6 +405,49 @@ def _memdata(osdata):
             grains['mem_total'] = int(tot_bytes / (1024 ** 2))
     return grains
 
+def _windows_virtual(osdata):
+    '''
+    Returns what type of virtual hardware is under the hood, kvm or physical
+    '''
+    # Provides:
+    #   virtual
+    #   virtual_subtype
+    grains = dict()
+    if osdata['kernel'] != 'Windows':
+        return grains
+
+    if 'QEMU' in osdata.get('manufacturer',''):
+        # FIXME: Make this detect between kvm or qemu
+        grains['virtual'] = 'kvm'
+    if 'Bochs' in osdata.get('manufacturer',''):
+        grains['virtual'] = 'kvm'
+    # Product Name: (oVirt) www.ovirt.org
+    # Red Hat Community virtualization Project based on kvm
+    elif 'oVirt' in osdata.get('productname',''):
+        grains['virtual'] = 'kvm'
+        grains['virtual_subtype'] = 'oVirt'
+    # Red Hat Enterprise Virtualization
+    elif 'RHEV Hypervisor' in osdata.get('productname',''):
+        grains['virtual'] = 'kvm'
+        grains['virtual_subtype'] = 'rhev'
+    # Product Name: VirtualBox
+    elif 'VirtualBox' in osdata.get('productname',''):
+        grains['virtual'] = 'VirtualBox'
+    # Product Name: VMware Virtual Platform
+    elif 'VMware Virtual Platform' in osdata.get('productname',''):
+        grains['virtual'] = 'VMware'
+    # Manufacturer: Microsoft Corporation
+    # Product Name: Virtual Machine
+    elif 'Microsoft' in osdata.get('manufacturer','') and \
+         'Virtual Machine' in osdata.get('productname', ''):
+        grains['virtual'] = 'VirtualPC'
+    # Manufacturer: Parallels Software International Inc.
+    elif 'Parallels Software' in osdata.get('manufacturer'):
+        grains['virtual'] = 'Parallels'
+
+    if HAS_WMI:
+        pass
+    return grains
 
 def _virtual(osdata):
     '''
@@ -428,7 +472,7 @@ def _virtual(osdata):
 
         cmd = '%s %s' % (command, ' '.join(args))
 
-        ret = __salt__['cmd.run_all'](cmd)
+        ret = __coresalt__['cmd.run_all'](cmd)
 
         if ret['retcode'] > 0:
             if salt.log.is_logging_configured():
@@ -468,6 +512,11 @@ def _virtual(osdata):
             # Red Hat Community virtualization Project based on kvm
             elif 'Manufacturer: oVirt' in output:
                 grains['virtual'] = 'kvm'
+                grains['virtual_subtype'] = 'ovirt'
+            # Red Hat Enterprise Virtualization
+            elif 'Product Name: RHEV Hypervisor' in output:
+                grains['virtual'] = 'kvm'
+                grains['virtual_subtype'] = 'rhev'
             elif 'VirtualBox' in output:
                 grains['virtual'] = 'VirtualBox'
             # Product Name: VMware Virtual Platform
@@ -538,7 +587,7 @@ def _virtual(osdata):
                 # Tested on Fedora 10 / 2.6.27.30-170.2.82 with xen
                 # Tested on Fedora 15 / 2.6.41.4-1 without running xen
                 elif isdir('/sys/bus/xen'):
-                    if 'xen:' in __salt__['cmd.run']('dmesg').lower():
+                    if 'xen:' in __coresalt__['cmd.run']('dmesg').lower():
                         grains['virtual_subtype'] = 'Xen PV DomU'
                     elif os.listdir('/sys/bus/xen/drivers'):
                         # An actual DomU will have several drivers
@@ -553,16 +602,16 @@ def _virtual(osdata):
     elif osdata['kernel'] == 'FreeBSD':
         kenv = salt.utils.which('kenv')
         if kenv:
-            product = __salt__['cmd.run']('{0} smbios.system.product'.format(kenv))
-            maker = __salt__['cmd.run']('{0} smbios.system.maker'.format(kenv))
+            product = __coresalt__['cmd.run']('{0} smbios.system.product'.format(kenv))
+            maker = __coresalt__['cmd.run']('{0} smbios.system.maker'.format(kenv))
             if product.startswith('VMware'):
                 grains['virtual'] = 'VMware'
             if maker.startswith('Xen'):
                 grains['virtual_subtype'] = '{0} {1}'.format(maker, product)
                 grains['virtual'] = 'xen'
         if sysctl:
-            model = __salt__['cmd.run']('{0} hw.model'.format(sysctl))
-            jail = __salt__['cmd.run']('{0} -n security.jail.jailed'.format(sysctl))
+            model = __coresalt__['cmd.run']('{0} hw.model'.format(sysctl))
+            jail = __coresalt__['cmd.run']('{0} -n security.jail.jailed'.format(sysctl))
             if jail == '1':
                 grains['virtual_subtype'] = 'jail'
             if 'QEMU Virtual CPU' in model:
@@ -571,7 +620,7 @@ def _virtual(osdata):
         # Check if it's a "regular" zone. (i.e. Solaris 10/11 zone)
         zonename = salt.utils.which('zonename')
         if zonename:
-            zone = __salt__['cmd.run']('{0}'.format(zonename))
+            zone = __coresalt__['cmd.run']('{0}'.format(zonename))
             if zone != 'global':
                 grains['virtual'] = 'zone'
                 if osdata['os'] == 'SmartOS':
@@ -581,17 +630,17 @@ def _virtual(osdata):
             grains['virtual'] = 'zone'
     elif osdata['kernel'] == 'NetBSD':
         if sysctl:
-            if 'QEMU Virtual CPU' in __salt__['cmd.run'](
+            if 'QEMU Virtual CPU' in __coresalt__['cmd.run'](
                     '{0} -n machdep.cpu_brand'.format(sysctl)):
                 grains['virtual'] = 'kvm'
-            elif not 'invalid' in __salt__['cmd.run'](
+            elif not 'invalid' in __coresalt__['cmd.run'](
                     '{0} -n machdep.xen.suspend'.format(sysctl)):
                 grains['virtual'] = 'Xen PV DomU'
-            elif 'VMware' in __salt__['cmd.run'](
+            elif 'VMware' in __coresalt__['cmd.run'](
                     '{0} -n machdep.dmi.system-vendor'.format(sysctl)):
                 grains['virtual'] = 'VMware'
             # NetBSD has Xen dom0 support
-            elif __salt__['cmd.run'](
+            elif __coresalt__['cmd.run'](
                     '{0} -n machdep.idle-mechanism'.format(sysctl)) == 'xen':
                 if os.path.isfile('/var/run/xenconsoled.pid'):
                     grains['virtual_subtype'] = 'Xen Dom0'
@@ -779,6 +828,7 @@ def os_data():
         grains.update(_memdata(grains))
         grains.update(_windows_platform_data())
         grains.update(_windows_cpudata())
+        grains.update(_windows_virtual(grains))
         grains.update(_ps(grains))
         return grains
     elif salt.utils.is_linux():
@@ -894,7 +944,7 @@ def os_data():
         grains.update(_linux_gpu_data())
     elif grains['kernel'] == 'SunOS':
         grains['os_family'] = 'Solaris'
-        uname_v = __salt__['cmd.run']('uname -v')
+        uname_v = __coresalt__['cmd.run']('uname -v')
         if 'joyent_' in uname_v:
             # See https://github.com/joyent/smartos-live/issues/224
             grains['os'] = grains['osfullname'] = 'SmartOS'
@@ -920,7 +970,7 @@ def os_data():
     elif grains['kernel'] == 'VMkernel':
         grains['os'] = 'ESXi'
     elif grains['kernel'] == 'Darwin':
-        osrelease = __salt__['cmd.run']('sw_vers -productVersion')
+        osrelease = __coresalt__['cmd.run']('sw_vers -productVersion')
         grains['os'] = 'MacOS'
         grains['osrelease'] = osrelease
         grains.update(_bsd_cpudata(grains))
@@ -945,7 +995,7 @@ def os_data():
     # considerations such as package management. Fall back to the CPU
     # architecture.
     if grains.get('os_family') == 'Debian':
-        osarch = __salt__['cmd.run']('dpkg --print-architecture').strip()
+        osarch = __coresalt__['cmd.run']('dpkg --print-architecture').strip()
     else:
         osarch = grains['cpuarch']
     grains['osarch'] = osarch
@@ -1201,9 +1251,9 @@ def _dmidecode_data(regex_dict):
 
     # No use running if dmidecode/smbios isn't in the path
     if salt.utils.which('dmidecode'):
-        out = __salt__['cmd.run']('dmidecode')
+        out = __coresalt__['cmd.run']('dmidecode')
     elif salt.utils.which('smbios'):
-        out = __salt__['cmd.run']('smbios')
+        out = __coresalt__['cmd.run']('smbios')
     else:
         log.info(
             'The `dmidecode` binary is not available on the system. GPU grains '
@@ -1303,7 +1353,7 @@ def _hw_data(osdata):
                 'biosreleasedate': 'smbios.bios.reldate',
             }
             for key, val in fbsd_hwdata.items():
-                grains[key] = __salt__['cmd.run']('{0} {1}'.format(kenv, val))
+                grains[key] = __coresalt__['cmd.run']('{0} {1}'.format(kenv, val))
     elif osdata['kernel'] == 'OpenBSD':
         sysctl = salt.utils.which('sysctl')
         hwdata = {'biosversion': 'hw.version',
@@ -1311,7 +1361,7 @@ def _hw_data(osdata):
                   'productname': 'hw.product',
                   'serialnumber': 'hw.serialno'}
         for key, oid in hwdata.items():
-            value = __salt__['cmd.run']('{0} -n {1}'.format(sysctl, oid))
+            value = __coresalt__['cmd.run']('{0} -n {1}'.format(sysctl, oid))
             if not value.endswith(' value is not available'):
                 grains[key] = value
     elif osdata['kernel'] == 'NetBSD':
@@ -1324,7 +1374,7 @@ def _hw_data(osdata):
             'biosreleasedate': 'machdep.dmi.bios-date',
         }
         for key, oid in nbsd_hwdata.items():
-            result = __salt__['cmd.run_all']('{0} -n {1}'.format(sysctl, oid))
+            result = __coresalt__['cmd.run_all']('{0} -n {1}'.format(sysctl, oid))
             if result['retcode'] == 0:
                 grains[key] = result['stdout']
 
